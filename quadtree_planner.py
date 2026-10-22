@@ -12,7 +12,7 @@ def regular_polygon(center, n, radius, rotation=0.0):
 
 obstaculos = []
 
-for aprox, (cx, cy), nome in deteccoes:
+for approx, (cx, cy), nome in deteccoes:
     #opcao 1: usar o proprio contorno aproximado como obstaculo
     #obstaculos.append(approx.reshape(-1, 2).astype(float))
 
@@ -48,10 +48,10 @@ def subdivide(cell, obstacles, max_depth, depth=0):
     children = split_into_quandrants(cell)
     return [subdivide(c, obstacles, max_depth, depth+1) for c in children]
 
-def cell_intersects_obstacles():
+def cell_intersects_obstacles(cell, obstacles):
     pass
 
-def split_into_quandrants():
+def split_into_quandrants(cell):
     pass
 
 ## Integração com o mapa de polígonos regulares // Funções auxiliares ##########################################################
@@ -65,7 +65,7 @@ def point_in_any_polygon(pt, obstacles):
 def dist_point_polygon(pt, poly):
     #Distancia minima do ponto ao poligono
     #(0, se dentro; senao, distancia ao segmento mais proximo)
-    if point_in_polygon():
+    if point_in_polygon(pt, poly):
         return 0.0
     dmin = np.inf
     n = len(poly)
