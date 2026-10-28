@@ -1,15 +1,34 @@
 import cv2
 import numpy as np
 import math
+import os
+import platform
 
 # --- Parâmetros Críticos ---
 MIN_AREA = 500
 
 EPSILON_FACTOR = 0.018
 USAR_WEBCAM = True
-CAM_INDEX = 2
+CAM_INDEX = 1
 
 GRID_SIZE = (128, 128)
+
+# Imagem de teste (mesma pasta do script) - funciona em Windows e Linux
+IMAGEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder_formas.jpeg")
+
+def abrir_camera(indice=CAM_INDEX, largura=1920, altura=1080):
+    """Abre a câmera com o backend adequado ao sistema operacional.
+    Windows: DirectShow (o MSMF padrão costuma falhar com câmeras virtuais como o Iriun).
+    Linux: V4L2 (dispositivo /dev/videoN, como no roteiro)."""
+    if platform.system() == "Windows":
+        cap = cv2.VideoCapture(indice, cv2.CAP_DSHOW)
+    else:
+        cap = cv2.VideoCapture(indice, cv2.CAP_V4L2)
+    if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, largura)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, altura)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # buffer mínimo (Algoritmo 1, linha 3)
+    return cap
 
 CORES = {
     "amarelo": (0, 255, 255),
@@ -103,7 +122,7 @@ def processar_frame(frame):
 
 def main():
     if not USAR_WEBCAM:
-        imagem_path = "/home/jcgsouza/UEFS/SRA_p2/placeholder_formas.jpeg"
+        imagem_path = IMAGEM_PATH
         frame = cv2.imread(imagem_path)
         if frame is None:
             print(f"Erro: Não foi possível carregar a imagem {imagem_path}")
@@ -114,9 +133,7 @@ def main():
         cv2.imshow("Mapa de Ocupacao Binarizado (128x128)", mapa_visual)
         cv2.waitKey(0)
     else:
-        cap = cv2.VideoCapture(CAM_INDEX)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        cap = abrir_camera()
 
         if not cap.isOpened():
             print("Erro: Não foi possível abrir a câmera.")
@@ -125,7 +142,10 @@ def main():
         print("Pressione 'q' para sair.")
         while True:
             ret, frame = cap.read()
-            if not ret: break
+            if not ret:  # câmeras via Wi-Fi podem falhar nas primeiras leituras
+                if cv2.waitKey(30) & 0xFF == ord('q'):
+                    break
+                continue
 
             frame_anotado, mapa_visual, _ = processar_frame(frame)
             cv2.imshow("Câmera do Robô - Formas", frame_anotado)
