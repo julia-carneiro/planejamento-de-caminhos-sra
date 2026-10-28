@@ -1,6 +1,8 @@
 import heapq
 import sys
 
+## O listing que tem em alguns comentários é pra indicar a qual pseudocodigo aquele trecho é referente
+
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
