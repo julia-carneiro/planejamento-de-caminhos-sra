@@ -2,6 +2,7 @@ import heapq
 import sys
 
 ## O listing que tem em alguns comentários é pra indicar a qual pseudocodigo aquele trecho é referente
+## Rodar quadtree_planney.py e apertar 'p' para capturar o frame, aí ele pega o frame e gera o caminho
 
 import cv2
 import numpy as np
