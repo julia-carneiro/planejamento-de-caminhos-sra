@@ -3,6 +3,9 @@ import math
 import heapq
 import cv2
 import numpy as np
+
+import matplotlib
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
 from matplotlib.transforms import Bbox
@@ -12,12 +15,25 @@ from Remote_Position_Control_TEC220 import connect, run_mission
 
 RESOLUCAO = 15
 MAX_DEPTH = 7
-PORTA_SERIAL = "COM11"
+PORTA_SERIAL = "/dev/rfcomm0"
 BAUD_RATE = 115200
-TESTE_SEM_ROBO = True
+TESTE_SEM_ROBO = False
+MAX_WAYPOINTS = 10
 
 destino_pixel = None
 inicio_pixel = None
+
+def limitar_waypoints(caminho, max_pts=10):
+    """
+    Reduz a quantidade de pontos do caminho para no máximo 'max_pts',
+    garantindo que o início e o final sejam preservados.
+    """
+    if not caminho or len(caminho) <= max_pts:
+        return caminho
+
+    # Gera índices distribuídos igualmente do primeiro ao último ponto
+    indices = np.linspace(0, len(caminho) - 1, max_pts, dtype=int)
+    return [caminho[i] for i in indices]
 
 def capturar_clique(event, x, y, flags, param):
     global destino_pixel, inicio_pixel
@@ -33,12 +49,12 @@ def detectar_robo(frame):
     mask1 = cv2.inRange(hsv, np.array([0, 140, 100]), np.array([10, 255, 255]))
     mask2 = cv2.inRange(hsv, np.array([170, 140, 100]), np.array([180, 255, 255]))
     mask = cv2.bitwise_or(mask1, mask2)
-    
+
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
+
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+
     possiveis_robos = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -48,7 +64,7 @@ def detectar_robo(frame):
                 circ = (4 * math.pi * area) / (peri ** 2)
                 if circ > 0.4:
                     possiveis_robos.append(cnt)
-                    
+
     if possiveis_robos:
         melhor_contorno = max(possiveis_robos, key=cv2.contourArea)
         M = cv2.moments(melhor_contorno)
@@ -61,21 +77,21 @@ def detectar_robo(frame):
 def calibrar_camera(frame, tamanho_quadrado_m=0.025):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     padroes = [(8, 6), (8, 5), (9, 6), (7, 6)]
-    
+
     for padrao in padroes:
         ret, corners = cv2.findChessboardCorners(gray, padrao, None)
         if ret:
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
             corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-            
+
             obj_points = np.zeros((padrao[0] * padrao[1], 2), np.float32)
             obj_points[:, :2] = np.mgrid[0:padrao[0], 0:padrao[1]].T.reshape(-1, 2)
             obj_points *= tamanho_quadrado_m
-            
+
             H, _ = cv2.findHomography(corners, obj_points)
             print(f"Calibracao bem-sucedida usando padrao {padrao}")
             return H
-            
+
     return None
 
 def pixel_para_real(pontos_pixels, H):
@@ -118,40 +134,38 @@ def obter_deteccoes(frame, inicio=None, destino=None):
     kernel = np.ones((3, 3), np.uint8)
     edges = cv2.dilate(edges, kernel, iterations=1)
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    
+
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     deteccoes = []
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < MIN_AREA: 
+        if area < MIN_AREA:
             continue
-            
-        # Ignorar contornos gigantes (como a borda da mesa) analisando a largura e altura
+
         x, y, w, h = cv2.boundingRect(cnt)
         if w > frame.shape[1] * 0.40 or h > frame.shape[0] * 0.40:
             continue
-            
-        # Evitar que o próprio robô ou o destino sejam validados como obstáculos
+
         if inicio is not None and cv2.pointPolygonTest(cnt, inicio, False) >= 0:
             continue
         if destino is not None and cv2.pointPolygonTest(cnt, destino, False) >= 0:
             continue
-            
+
         peri = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, EPSILON_FACTOR * peri, True)
-        if len(approx) > 12 or len(approx) < 3:  # < 3 vértices não é polígono
+        if len(approx) > 12 or len(approx) < 3:
             continue
-            
+
         nome, _ = classificar_forma(cnt, approx)
         M = cv2.moments(cnt)
         if M["m00"] == 0:
             continue
-            
+
         cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
         deteccoes.append((approx, (cx, cy), nome))
-        
+
     return deteccoes
 
 def montar_obstaculos(deteccoes):
@@ -164,7 +178,7 @@ def build_grid(bounds, obstacles, resolution=0.1):
     xmin, ymin, xmax, ymax = bounds
     nx = int((xmax - xmin) / resolution)
     ny = int((ymax - ymin) / resolution)
-    grid = np.zeros((nx, ny), dtype=np.uint8)  # 0=livre, 1=ocupado
+    grid = np.zeros((nx, ny), dtype=np.uint8)
 
     for i in range(nx):
         for j in range(ny):
@@ -212,7 +226,6 @@ def plan_on_grid(grid, start, goal, resolution=0.1, bounds=None):
     if g not in pai:
         return None
 
-    # Retorna sequencia de centros de celulas
     caminho = []
     no = g
     while no is not None:
@@ -227,12 +240,10 @@ def subdivide(cell, obstacles, max_depth, depth=0):
     return [subdivide(c, obstacles, max_depth, depth + 1) for c in children]
 
 def cell_intersects_obstacles(cell, obstacles):
-    # A celula toca algum obstaculo (borda ou interior)?
     caixa = Bbox.from_extents(*cell)
     return any(Path(np.vstack([poly, poly[:1]]), closed=True).intersects_bbox(caixa, filled=True) for poly in obstacles)
 
 def split_into_quadrants(cell):
-    # Ordem do artigo: A (sup. esq.), B (sup. dir.), C (inf. dir.), D (inf. esq.)
     xmin, ymin, xmax, ymax = cell
     xm, ym = (xmin + xmax) / 2, (ymin + ymax) / 2
     return [(xmin, ymin, xm, ym), (xm, ymin, xmax, ym),
@@ -301,7 +312,7 @@ def point_in_any_polygon(pt, obstacles):
 def interface_captura():
     global destino_pixel, inicio_pixel
     frame_capturado = None
-    
+
     if len(sys.argv) > 1:
         f = cv2.imread(sys.argv[1])
         if f is None:
@@ -309,21 +320,21 @@ def interface_captura():
             return None, None
         cv2.namedWindow("Camera / Imagem")
         cv2.setMouseCallback("Camera / Imagem", capturar_clique)
-        
+
         pos_robo = detectar_robo(f)
         if pos_robo:
             inicio_pixel = pos_robo
-            
+
         while True:
             frame_display = f.copy()
             if inicio_pixel:
                 cv2.circle(frame_display, inicio_pixel, 8, (0, 255, 0), -1)
             if destino_pixel:
                 cv2.circle(frame_display, destino_pixel, 8, (0, 0, 255), -1)
-                
+
             cv2.imshow("Camera / Imagem", frame_display)
             tecla = cv2.waitKey(1) & 0xFF
-            
+
             if inicio_pixel and destino_pixel:
                 frame_capturado = f
                 break
@@ -331,38 +342,43 @@ def interface_captura():
                 break
         cv2.destroyAllWindows()
         return frame_capturado, inicio_pixel
-        
+
     else:
         cap = abrir_camera()
-        if not cap.isOpened(): return None, None
-        
+        if not cap.isOpened():
+            print("Erro ao abrir a câmera.")
+            return None, None
+
         cv2.namedWindow("Camera / Imagem")
         cv2.setMouseCallback("Camera / Imagem", capturar_clique)
 
         while True:
             ret, f = cap.read()
-            if not ret: continue
-            
+            if not ret or f is None:
+                if cv2.waitKey(30) & 0xFF == ord('q'):
+                    break
+                continue
+
             frame_display = f.copy()
             pos_robo = detectar_robo(f)
-            
-            if pos_robo and inicio_pixel is None:
+
+            if pos_robo:
                 inicio_pixel = pos_robo
-                
-            if inicio_pixel:
-                cv2.circle(frame_display, inicio_pixel, 8, (0, 255, 0), -1)
+                cv2.circle(frame_display, pos_robo, 8, (0, 255, 0), -1)
+
             if destino_pixel:
                 cv2.circle(frame_display, destino_pixel, 8, (0, 0, 255), -1)
-                
+
+            # Exibe o frame atualizado e permite ler o clique do mouse e a tecla 'q'
             cv2.imshow("Camera / Imagem", frame_display)
             tecla = cv2.waitKey(1) & 0xFF
-            
+
             if inicio_pixel and destino_pixel:
                 frame_capturado = f
                 break
             elif tecla == ord('q'):
                 break
-                
+
         cap.release()
         cv2.destroyAllWindows()
         return frame_capturado, inicio_pixel
@@ -387,9 +403,10 @@ def main():
     caminho_qt, folhas_livres = plan_on_quadtree(tree, obstaculos, start, goal)
 
     if caminho_qt:
+        caminho_qt_limitado = limitar_waypoints(caminho_qt, max_pts=MAX_WAYPOINTS)
         H = calibrar_camera(frame)
         if H is not None:
-            caminho_metros = pixel_para_real(caminho_qt, H)
+            caminho_metros = pixel_para_real(caminho_qt_limitado, H)
             waypoints = converter_caminho_para_waypoints(caminho_metros)
             enviar_para_robo(waypoints, PORTA_SERIAL, BAUD_RATE)
         else:
@@ -397,7 +414,7 @@ def main():
 
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    
+
     for ax, titulo, caminho in [(ax1, f"Grade regular ({RESOLUCAO}px)", caminho_grade),
                                 (ax2, f"Quadtree ({len(folhas_livres)} folhas livres)", caminho_qt)]:
         ax.imshow(rgb)
@@ -408,10 +425,11 @@ def main():
         ax.plot(*start, "bo", markersize=8)
         ax.plot(*goal, "yo", markersize=8)
         ax.set_title(titulo)
-        
+
     for f in folhas_livres:
         ax2.add_patch(plt.Rectangle((f[0], f[1]), f[2] - f[0], f[3] - f[1],
                                     fill=False, edgecolor="gray", linewidth=0.3))
+
     plt.tight_layout()
     plt.show()
 

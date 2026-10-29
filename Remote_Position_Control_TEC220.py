@@ -23,7 +23,7 @@ import argparse
 import serial
 import serial.tools.list_ports
 
-DEFAULT_PORT = "COM11"
+DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 115200
 TIMEOUT_S = 1.0
 RESPONSE_TIMEOUT_S = 2.0

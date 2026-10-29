@@ -6,20 +6,18 @@ import platform
 
 # --- Parâmetros Críticos ---
 MIN_AREA = 500
-
 EPSILON_FACTOR = 0.018
 USAR_WEBCAM = True
-CAM_INDEX = 1
+CAM_INDEX = 0  # Define o índice 0 do Iriun (/dev/video0)
 
 GRID_SIZE = (128, 128)
 
 # Imagem de teste (mesma pasta do script) - funciona em Windows e Linux
 IMAGEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder_formas.jpeg")
 
-def abrir_camera(indice=CAM_INDEX, largura=1920, altura=1080):
-    """Abre a câmera com o backend adequado ao sistema operacional.
-    Windows: DirectShow (o MSMF padrão costuma falhar com câmeras virtuais como o Iriun).
-    Linux: V4L2 (dispositivo /dev/videoN, como no roteiro)."""
+# Altera largura=640 e altura=480 nos parâmetros padrão:
+def abrir_camera(indice=CAM_INDEX, largura=640, altura=480):
+    """Abre a câmara com o backend adequado e resolução compatível."""
     if platform.system() == "Windows":
         cap = cv2.VideoCapture(indice, cv2.CAP_DSHOW)
     else:
@@ -27,7 +25,7 @@ def abrir_camera(indice=CAM_INDEX, largura=1920, altura=1080):
     if cap.isOpened():
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, largura)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, altura)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # buffer mínimo (Algoritmo 1, linha 3)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
 CORES = {
