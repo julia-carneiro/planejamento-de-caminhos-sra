@@ -88,14 +88,21 @@ def cmd_and_wait(ser, cmd, timeout=RESPONSE_TIMEOUT_S):
 def add_waypoint(ser, x, y, th):
     return cmd_and_wait(ser, f"A,{x:.3f},{y:.3f},{th:.1f}")
 
-
+# Problema do buffer n tava recebendo os waypoints, tem q testar se assim vai - ainda n sei. 
 def set_waypoints(ser, pts):
     if not pts:
         return cmd_and_wait(ser, "C")
-    body = f"W,{len(pts)}"
+    
+    resp = cmd_and_wait(ser, "C")
+    if resp != "<OK>":
+        return resp
+        
     for (x, y, th) in pts:
-        body += f",{x:.3f},{y:.3f},{th:.1f}"
-    return cmd_and_wait(ser, body)
+        resp = cmd_and_wait(ser, f"A,{x:.3f},{y:.3f},{th:.1f}")
+        if resp != "<OK>":
+            return resp
+            
+    return "<OK>"
 
 
 def append_waypoints(ser, pts):

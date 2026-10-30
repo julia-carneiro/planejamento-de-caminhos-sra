@@ -4,20 +4,21 @@ import math
 import os
 import platform
 
-# --- Parâmetros Críticos ---
 MIN_AREA = 500
 EPSILON_FACTOR = 0.018
 USAR_WEBCAM = True
-CAM_INDEX = 0  # Define o índice 0 do Iriun (/dev/video0)
+CAM_INDEX = 0
 
 GRID_SIZE = (128, 128)
-
-# Imagem de teste (mesma pasta do script) - funciona em Windows e Linux
 IMAGEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder_formas.jpeg")
 
-# Altera largura=640 e altura=480 nos parâmetros padrão:
+CORES = {
+    "amarelo": (0, 255, 255), "azul": (255, 0, 0), "verde": (0, 255, 0),
+    "laranja": (0, 165, 255), "magenta": (255, 0, 255), "vermelho": (0, 0, 255),
+    "roxo": (128, 0, 128), "ciano": (255, 255, 0), "cinza": (128, 128, 128)
+}
+
 def abrir_camera(indice=CAM_INDEX, largura=640, altura=480):
-    """Abre a câmara com o backend adequado e resolução compatível."""
     if platform.system() == "Windows":
         cap = cv2.VideoCapture(indice, cv2.CAP_DSHOW)
     else:
@@ -28,29 +29,13 @@ def abrir_camera(indice=CAM_INDEX, largura=640, altura=480):
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap
 
-CORES = {
-    "amarelo": (0, 255, 255),
-    "azul": (255, 0, 0),
-    "verde": (0, 255, 0),
-    "laranja": (0, 165, 255),
-    "magenta": (255, 0, 255),
-    "vermelho": (0, 0, 255),
-    "roxo": (128, 0, 128),
-    "ciano": (255, 255, 0),
-    "cinza": (128, 128, 128)
-}
-
 def classificar_forma(cnt, approx):
-    """Algoritmo 2: Classificação da forma a partir do contorno e aproximação."""
     v = len(approx)
     area = cv2.contourArea(cnt)
     peri = cv2.arcLength(cnt, True)
-
     if peri == 0:
         return f"poligono ({v})", CORES["cinza"]
-
     circ = (4 * math.pi * area) / (peri ** 2)
-
     if v >= 8 and circ > 0.85: return "circulo", CORES["amarelo"]
     elif v == 3: return "triangulo", CORES["azul"]
     elif v == 4:
@@ -64,96 +49,90 @@ def classificar_forma(cnt, approx):
     else: return f"poligono ({v})", CORES["cinza"]
 
 def gerar_mapa_ocupacao(shape_original, contornos_obstaculos):
-    """Gera matriz binarizada de ocupação e visualização do mapa."""
     mascara_vazia = np.zeros(shape_original[:2], dtype=np.uint8)
     cv2.drawContours(mascara_vazia, contornos_obstaculos, -1, 255, thickness=cv2.FILLED)
-
     mapa_redimensionado = cv2.resize(mascara_vazia, GRID_SIZE, interpolation=cv2.INTER_NEAREST)
     matriz_ocupacao = (mapa_redimensionado > 0).astype(np.uint8)
-
     return matriz_ocupacao, mapa_redimensionado
 
-def processar_frame(frame):
-    """Algoritmo 1: Pre-processamento, segmentação e anotação."""
-    # Pré-processamento
+def detectar_robo(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask1 = cv2.inRange(hsv, np.array([0, 140, 100]), np.array([10, 255, 255]))
+    mask2 = cv2.inRange(hsv, np.array([170, 140, 100]), np.array([180, 255, 255]))
+    mask = cv2.bitwise_or(mask1, mask2)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    possiveis_robos = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if 30 < area < 3000:
+            peri = cv2.arcLength(cnt, True)
+            if peri > 0:
+                circ = (4 * math.pi * area) / (peri ** 2)
+                if circ > 0.4:
+                    possiveis_robos.append(cnt)
+    if possiveis_robos:
+        melhor_contorno = max(possiveis_robos, key=cv2.contourArea)
+        M = cv2.moments(melhor_contorno)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            return (cx, cy)
+    return None
+
+def obter_deteccoes(frame, inicio=None, destino=None):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
-
     kernel = np.ones((3, 3), np.uint8)
     edges = cv2.dilate(edges, kernel, iterations=1)
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-
-    # Segmentação
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contornos_validos = []
-
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    deteccoes = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < MIN_AREA:
             continue
-
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w > frame.shape[1] * 0.40 or h > frame.shape[0] * 0.40:
+            continue
+        if inicio is not None and cv2.pointPolygonTest(cnt, inicio, False) >= 0:
+            continue
+        if destino is not None and cv2.pointPolygonTest(cnt, destino, False) >= 0:
+            continue
         peri = cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, EPSILON_FACTOR * peri, True)
-
-        if len(approx) > 12:
+        if len(approx) > 12 or len(approx) < 3:
             continue
-
-        contornos_validos.append(approx)
-
-        # Classificação
-        nome, cor = classificar_forma(cnt, approx)
-        v = len(approx)
-
-        cv2.drawContours(frame, [cnt], -1, CORES["cinza"], 1)
-        cv2.drawContours(frame, [approx], -1, cor, 3)
-
+        nome, _ = classificar_forma(cnt, approx)
         M = cv2.moments(cnt)
-        if M["m00"] != 0:
-            cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-            cv2.circle(frame, (cx, cy), 4, (0, 0, 0), -1)
-            rotulo = f"{nome} ({v}v)"
-            cv2.putText(frame, rotulo, (cx - 20, cy - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cor, 2)
+        if M["m00"] == 0:
+            continue
+        cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
+        deteccoes.append((approx, (cx, cy), nome))
+    return deteccoes
 
-    matriz, mapa_visual = gerar_mapa_ocupacao(frame.shape, contornos_validos)
-    return frame, mapa_visual, matriz
+def montar_obstaculos(deteccoes):
+    obstaculos = []
+    for approx, _, _ in deteccoes:
+        obstaculos.append(approx.reshape(-1, 2).astype(float))
+    return obstaculos
 
-def main():
-    if not USAR_WEBCAM:
-        imagem_path = IMAGEM_PATH
-        frame = cv2.imread(imagem_path)
-        if frame is None:
-            print(f"Erro: Não foi possível carregar a imagem {imagem_path}")
-            return
-
-        frame_anotado, mapa_visual, _ = processar_frame(frame)
-        cv2.imshow("Câmera do Robô - Formas", frame_anotado)
-        cv2.imshow("Mapa de Ocupacao Binarizado (128x128)", mapa_visual)
-        cv2.waitKey(0)
-    else:
-        cap = abrir_camera()
-
-        if not cap.isOpened():
-            print("Erro: Não foi possível abrir a câmera.")
-            return
-
-        print("Pressione 'q' para sair.")
-        while True:
-            ret, frame = cap.read()
-            if not ret:  # câmeras via Wi-Fi podem falhar nas primeiras leituras
-                if cv2.waitKey(30) & 0xFF == ord('q'):
-                    break
-                continue
-
-            frame_anotado, mapa_visual, _ = processar_frame(frame)
-            cv2.imshow("Câmera do Robô - Formas", frame_anotado)
-            cv2.imshow("Mapa de Ocupacao Binarizado (128x128)", mapa_visual)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-        cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+def expandir_obstaculos_minkowski(obstaculos_originais, shape, raio_px):
+    if not obstaculos_originais:
+        return []
+    mask = np.zeros(shape[:2], dtype=np.uint8)
+    int_obstaculos = [np.array(poly, dtype=np.int32) for poly in obstaculos_originais]
+    cv2.fillPoly(mask, int_obstaculos, 255)
+    kernel_size = int(raio_px * 2 + 1)
+    kernel_disco = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    mask_expandida = cv2.dilate(mask, kernel_disco, iterations=1)
+    contours, _ = cv2.findContours(mask_expandida, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    obstaculos_expandidos = []
+    for cnt in contours:
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.01 * peri, True)
+        if len(approx) >= 3:
+            obstaculos_expandidos.append(approx.reshape(-1, 2).astype(float))
+    return obstaculos_expandidos
