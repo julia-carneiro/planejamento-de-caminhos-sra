@@ -23,8 +23,8 @@ import argparse
 import serial
 import serial.tools.list_ports
 
-DEFAULT_PORT = "/dev/ttyUSB0"
-DEFAULT_BAUD = 115200
+DEFAULT_PORT = "COM3"
+DEFAULT_BAUD = 57600
 TIMEOUT_S = 1.0
 RESPONSE_TIMEOUT_S = 2.0
 AUTO_EQ_S = 2.0
@@ -88,21 +88,14 @@ def cmd_and_wait(ser, cmd, timeout=RESPONSE_TIMEOUT_S):
 def add_waypoint(ser, x, y, th):
     return cmd_and_wait(ser, f"A,{x:.3f},{y:.3f},{th:.1f}")
 
-# Problema do buffer n tava recebendo os waypoints, tem q testar se assim vai - ainda n sei. 
+
 def set_waypoints(ser, pts):
     if not pts:
         return cmd_and_wait(ser, "C")
-    
-    resp = cmd_and_wait(ser, "C")
-    if resp != "<OK>":
-        return resp
-        
+    body = f"W,{len(pts)}"
     for (x, y, th) in pts:
-        resp = cmd_and_wait(ser, f"A,{x:.3f},{y:.3f},{th:.1f}")
-        if resp != "<OK>":
-            return resp
-            
-    return "<OK>"
+        body += f",{x:.3f},{y:.3f},{th:.1f}"
+    return cmd_and_wait(ser, body)
 
 
 def append_waypoints(ser, pts):
@@ -255,7 +248,8 @@ def run_mission(ser, pts, poll_s=0.5, timeout_s=120.0):
     print(f"[1/3] Enviando {len(pts)} waypoints via <W>...")
     resp = set_waypoints(ser, pts)
     print(f"      resposta: {resp}")
-    if resp is None or not resp.startswith("<OK"):
+    if resp is None or not resp.startswith("<OK>"):
+        print(resp)
         return False, "falha ao enviar waypoints"
 
     print("[2/3] Disparando <R> (liga + auto-eq 2s + navega)...")

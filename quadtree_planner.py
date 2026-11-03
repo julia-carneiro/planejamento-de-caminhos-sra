@@ -7,15 +7,15 @@ import matplotlib.pyplot as plt
 from identificar_formas import abrir_camera, detectar_robo, obter_deteccoes, montar_obstaculos, expandir_obstaculos_minkowski
 from calibracao import calibrar_camera, pixel_para_real
 from planejamento import build_grid, plan_on_grid, subdivide, plan_on_quadtree, limitar_waypoints, converter_caminho_para_waypoints
-from Remote_Position_Control_TEC220 import connect, run_mission
+import Remote_Position_Control_TEC220 as rpc
 
 RESOLUCAO = 15
 MAX_DEPTH = 7
-PORTA_SERIAL = "/dev/rfcomm0"
-BAUD_RATE = 115200
+PORTA_SERIAL = "COM3"
+BAUD_RATE = 57600
 TESTE_SEM_ROBO = False
 MAX_WAYPOINTS = 10
-RAIO_ROBO_PX = 25 
+RAIO_ROBO_PX = 25
 
 destino_pixel = None
 inicio_pixel = None
@@ -27,14 +27,68 @@ def capturar_clique(event, x, y, flags, param):
     elif event == cv2.EVENT_RBUTTONDOWN:
         inicio_pixel = (x, y)
 
-def enviar_para_robo(waypoints, porta, baud):
-    if TESTE_SEM_ROBO:
+def enviar_para_robo(waypoints, porta, baud, theta_inicial=0.0):
+    """
+    Envia os waypoints seguindo o protocolo do firmware:
+      <C>            zera a lista
+      <O,x,y,th>     alinha a odometria do robô ao referencial do tabuleiro
+      <A,x,y,th>     um waypoint por comando (mensagens curtas)
+      <R>            liga + auto-equilíbrio + navega
+    Formato numérico: x,y em metros com 3 casas; th em graus com 1 casa.
+    """
+
+    # Converte np.float32 -> float nativo e normaliza theta para [-180, 180)
+    def normalizar(wp):
+        x, y, th = float(wp[0]), float(wp[1]), float(wp[2])
+        th = (th + 180.0) % 360.0 - 180.0
+        return round(x, 3), round(y, 3), round(th, 1)
+
+    pts = [normalizar(wp) for wp in waypoints]
+    if len(pts) < 2:
+        print("Caminho curto demais para enviar.")
         return
+
+    inicio, alvos = pts[0], pts[1:]   # o 1º ponto é a posição atual do robô
+
+    if TESTE_SEM_ROBO:
+        print("\n[MODO TESTE] Mensagens que seriam enviadas:")
+        print("  <C>")
+        print(f"  <O,{inicio[0]:.3f},{inicio[1]:.3f},{theta_inicial:.1f}>")
+        for x, y, th in alvos:
+            print(f"  <A,{x:.3f},{y:.3f},{th:.1f}>")
+        print("  <R>")
+        return
+
     try:
-        ser = connect(port=porta, baud=baud)
-        ok, msg = run_mission(ser, waypoints)
+        ser = rpc.connect(port=porta, baud=baud)
+        try:
+            resp = rpc.stop(ser)
+            print(f"<C> -> {resp}")
+
+            resp = rpc.set_pose(ser, inicio[0], inicio[1], theta_inicial)
+            print(f"<O> -> {resp}")
+            if resp is None or not resp.startswith("<OK"):
+                print("Falha ao redefinir a pose.")
+                return
+
+            for i, (x, y, th) in enumerate(alvos):
+                resp = rpc.add_waypoint(ser, x, y, th)
+                print(f"<A> WP {i}: x={x:.3f} y={y:.3f} th={th:.1f} -> {resp}")
+                if resp is None or not resp.startswith("<OK"):
+                    print(f"Falha ao enviar waypoint {i}.")
+                    return
+
+            ok, resp, msg = rpc.start(ser, wait_auto_eq=True)
+            print(f"<R> -> {resp} ({msg})")
+            if not ok:
+                return
+
+            concluido = rpc.wait_until_done_telemetry(ser, poll_s=0.5, timeout_s=120.0)
+            print("Status da missao:", "missão concluída" if concluido else "timeout de monitoramento")
+        finally:
+            ser.close()
     except Exception as e:
-        pass
+        print(f"Falha na comunicacao serial: {e}")
 
 def interface_captura():
     global destino_pixel, inicio_pixel
@@ -113,6 +167,14 @@ def main():
         H = calibrar_camera(frame)
         if H is not None:
             caminho_metros = pixel_para_real(caminho_qt_limitado, H)
+
+            # Detecta se o referencial do tabuleiro é de mão esquerda (como a imagem)
+            p0, px, py = pixel_para_real([start, (start[0] + 1, start[1]), (start[0], start[1] + 1)], H)
+            du = (px[0] - p0[0], px[1] - p0[1])
+            dv = (py[0] - p0[0], py[1] - p0[1])
+            if du[0] * dv[1] - du[1] * dv[0] > 0:
+                caminho_metros = [(x, -y) for x, y in caminho_metros]
+
             waypoints = converter_caminho_para_waypoints(caminho_metros)
             enviar_para_robo(waypoints, PORTA_SERIAL, BAUD_RATE)
 

@@ -7,7 +7,7 @@ import platform
 MIN_AREA = 500
 EPSILON_FACTOR = 0.018
 USAR_WEBCAM = True
-CAM_INDEX = 0
+CAM_INDEX = 1
 
 GRID_SIZE = (128, 128)
 IMAGEM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder_formas.jpeg")
