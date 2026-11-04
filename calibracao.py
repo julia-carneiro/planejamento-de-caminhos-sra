@@ -1,36 +1,50 @@
-import os
 import cv2
 import numpy as np
 
-def carregar_calibracao(arquivo="calibracao.npy"):
-    if os.path.exists(arquivo):
-        return np.load(arquivo)
-    return None
+TAMANHO_QUADRADO_M = 0.024
 
-def salvar_calibracao(H, arquivo="calibracao.npy"):
-    np.save(arquivo, H)
+PADROES = [(9, 6), (6, 9), (8, 6), (7, 6), (8, 5), (7, 5), (6, 5), (9, 7), (7, 4)]
 
-def calibrar_camera(frame, tamanho_quadrado_m=0.025):
-    H_salvo = carregar_calibracao()
-    if H_salvo is not None:
-        return H_salvo
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    padroes = [(8, 6), (8, 5), (9, 6), (7, 6)]
-    for padrao in padroes:
-        ret, corners = cv2.findChessboardCorners(gray, padrao, None)
+
+def _achar_cantos(gray, padrao):
+    if hasattr(cv2, "findChessboardCornersSB"):
+        ret, corners = cv2.findChessboardCornersSB(gray, padrao)
         if ret:
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-            obj_points = np.zeros((padrao[0] * padrao[1], 2), np.float32)
-            obj_points[:, :2] = np.mgrid[0:padrao[0], 0:padrao[1]].T.reshape(-1, 2)
-            obj_points *= tamanho_quadrado_m
-            H, _ = cv2.findHomography(corners, obj_points)
-            salvar_calibracao(H)
-            return H
+            return corners
+    flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+    ret, corners = cv2.findChessboardCorners(gray, padrao, flags)
+    if ret:
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        return cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
     return None
 
-def pixel_para_real(pontos_pixels, H):
-    if H is None or not pontos_pixels: return []
-    pts = np.array(pontos_pixels, dtype=np.float32).reshape(-1, 1, 2)
-    pts_reais = cv2.perspectiveTransform(pts, H)
-    return [tuple(p[0]) for p in pts_reais]
+
+def medir_px_por_metro(frame, tamanho_quadrado_m=TAMANHO_QUADRADO_M):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    for padrao in PADROES:
+        corners = _achar_cantos(gray, padrao)
+        if corners is None:
+            continue
+        grade = corners.reshape(padrao[1], padrao[0], 2)
+        dist_h = np.linalg.norm(np.diff(grade, axis=1), axis=2)
+        dist_v = np.linalg.norm(np.diff(grade, axis=0), axis=2)
+        px_por_quadrado = np.mean(np.concatenate([dist_h.ravel(), dist_v.ravel()]))
+        px_por_m = px_por_quadrado / tamanho_quadrado_m
+        print(f"Calibracao pelo tabuleiro (padrao {padrao}): {px_por_m / 100:.2f} px/cm")
+        return float(px_por_m)
+    return None
+
+
+def calibrar_camera(frame, escala_mesa=None):
+    px_por_m = medir_px_por_metro(frame)
+    if px_por_m is not None:
+        return px_por_m
+    if escala_mesa is not None:
+        print(f"Aviso: tabuleiro nao encontrado; usando escala da mesa ({escala_mesa / 100:.2f} px/cm).")
+        return float(escala_mesa)
+    return None
+
+
+def pixel_para_real(pontos_pixels, px_por_m, origem):
+    u0, v0 = origem
+    return [((u - u0) / px_por_m, -(v - v0) / px_por_m) for u, v in pontos_pixels]
