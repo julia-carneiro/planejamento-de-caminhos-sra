@@ -5,7 +5,7 @@ import platform
 
 MIN_AREA = 500
 EPSILON_FACTOR = 0.018
-CAM_INDEX = 1
+CAM_INDEX = 0
 
 COMPRIMENTO_MESA_M = 2.5
 LARGURA_MESA_M = 1.2
@@ -41,7 +41,7 @@ def detectar_robo(frame):
             return (int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]))
     return None
 
-def detectar_obstaculos(frame, inicio=None, destino=None):
+def detectar_obstaculos(frame, inicio=None, destino=None, raio_exclusao_robo=0):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
@@ -59,6 +59,12 @@ def detectar_obstaculos(frame, inicio=None, destino=None):
             continue
         if inicio is not None and cv2.pointPolygonTest(cnt, inicio, False) >= 0:
             continue
+        # contorno dentro/tocando o disco do robô -> é o próprio robô, não obstáculo
+        if inicio is not None and raio_exclusao_robo > 0:
+            if cv2.pointPolygonTest(cnt, inicio, True) >= -raio_exclusao_robo:
+                continue
+            if np.min(np.linalg.norm(cnt.reshape(-1, 2) - np.array(inicio), axis=1)) <= raio_exclusao_robo:
+                continue
         if destino is not None and cv2.pointPolygonTest(cnt, destino, False) >= 0:
             continue
         approx = cv2.approxPolyDP(cnt, EPSILON_FACTOR * cv2.arcLength(cnt, True), True)

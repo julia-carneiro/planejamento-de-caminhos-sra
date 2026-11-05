@@ -2,6 +2,7 @@ import sys
 import math
 import time
 import cv2
+import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -11,17 +12,20 @@ from identificar_formas import (abrir_camera, detectar_robo, detectar_obstaculos
                                 obstaculos_fora_da_mesa, escala_pela_mesa)
 from calibracao import calibrar_camera, pixel_para_real
 from planejamento import (build_grid, plan_on_grid, subdivide, plan_on_quadtree,
-                          limitar_waypoints, converter_caminho_para_waypoints)
+                          simplificar_caminho, converter_caminho_para_waypoints)
 import Remote_Position_Control_TEC220 as rpc
 
 RESOLUCAO = 15
 MAX_DEPTH = 7
-PORTA_SERIAL = "COM5"
+PORTA_SERIAL = "/dev/ttyUSB0"
 BAUD_RATE = 57600
 TESTE_SEM_ROBO = False
 MAX_WAYPOINTS = 10
-RAIO_ROBO_PX = 25
+RAIO_ROBO_PX = 50
+RAIO_EXCLUSAO_ROBO_PX = 90 # contornos dentro desse raio do robô são ignorados como obstáculo
 THETA_INICIAL = 0.0
+# Para onde a FRENTE do robô aponta na imagem ao iniciar, (u, v): (-1,0)=esquerda, (0,-1)=cima, (1,0)=direita
+FRENTE_ROBO_TELA = (-1.0, 0.0)
 FATOR_ODOMETRIA = 0.60 / 0.80
 
 destino_pixel = None
@@ -35,7 +39,7 @@ def capturar_clique(event, x, y, flags, param):
     elif event == cv2.EVENT_RBUTTONDOWN:
         inicio_pixel = (x, y)
 
-def monitorar_ate_parar(ser, poll_s=0.5, timeout_s=120.0, leituras_paradas=3):
+def monitorar_ate_parar(ser, poll_s=0.5, timeout_s=120.0, leituras_paradas=3, n_waypoints=None):
     t0 = time.time()
     paradas, ultima = 0, None
     while time.time() - t0 < timeout_s:
@@ -46,10 +50,13 @@ def monitorar_ate_parar(ser, poll_s=0.5, timeout_s=120.0, leituras_paradas=3):
             if t["state"] not in (0, 1) and abs(t["v"]) < 0.01:
                 paradas += 1
                 if paradas >= leituras_paradas:
+                    if n_waypoints is not None and t["wp"] < n_waypoints - 1:
+                        print(f"  Aviso: firmware em DONE no wp={t['wp']} de {n_waypoints - 1}; "
+                              f"missão encerrou antes do último waypoint.")
                     return True, ultima
             else:
                 paradas = 0
-        time.sleep(poll_s)
+        plt.pause(poll_s)  # mantém a janela do plot viva durante o monitoramento
     return False, ultima
 
 
@@ -101,12 +108,18 @@ def enviar_para_robo(waypoints, porta, baud, theta_inicial=0.0):
                     print(f"Falha ao enviar waypoint {i}.")
                     return
 
+            lista = rpc.list_waypoints(ser)
+            print(f"<L> -> robô tem {0 if lista is None else len(lista)} waypoints (enviados: {len(alvos)})")
+            if lista is None or len(lista) != len(alvos):
+                print("Lista do robô difere da enviada; abortando.")
+                return
+
             ok, resp, msg = rpc.start(ser, wait_auto_eq=True)
             print(f"<R> -> {resp} ({msg})")
             if not ok:
                 return
 
-            concluido, ultima = monitorar_ate_parar(ser)
+            concluido, ultima = monitorar_ate_parar(ser, n_waypoints=len(alvos))
             print("Status da missao:", "missão concluída" if concluido else "timeout de monitoramento")
             if ultima is not None:
                 print(f"Posicao final (odometria): x={ultima['x']:+.3f} m  y={ultima['y']:+.3f} m  "
@@ -131,8 +144,9 @@ def interface_captura():
     cv2.namedWindow("Camera / Imagem")
     cv2.setMouseCallback("Camera / Imagem", capturar_clique)
 
-    if len(sys.argv) > 1:
-        f = cv2.imread(sys.argv[1])
+    args_img = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if args_img:
+        f = cv2.imread(args_img[0])
         if f is None:
             return None, None
         inicio_pixel = detectar_robo(f) or inicio_pixel
@@ -173,7 +187,8 @@ def main():
     goal = destino_pixel
 
     contorno_mesa = detectar_mesa(frame)
-    obstaculos_brutos = detectar_obstaculos(frame, inicio=start, destino=goal)
+    obstaculos_brutos = detectar_obstaculos(frame, inicio=start, destino=goal,
+                                           raio_exclusao_robo=RAIO_EXCLUSAO_ROBO_PX)
     escala_mesa = None
 
     if contorno_mesa is not None:
@@ -203,20 +218,41 @@ def main():
     tree = subdivide(bounds, obstaculos, MAX_DEPTH)
     caminho_qt, folhas_livres = plan_on_quadtree(tree, obstaculos, start, goal)
 
+    waypoints = None
+    caminho_wp = None
     if caminho_qt:
-        px_por_m = calibrar_camera(frame, escala_mesa=escala_mesa)
+        px_por_m = calibrar_camera(frame, escala_mesa=escala_mesa, recalibrar="--recalibrar" in sys.argv)
         if px_por_m is not None:
             print(f"Escala usada: {px_por_m / 100:.2f} px/cm")
-            caminho = limitar_waypoints(caminho_qt, max_pts=MAX_WAYPOINTS)
-            caminho_metros = pixel_para_real(caminho, px_por_m, origem=start)
+            mascara_obs = np.zeros(frame.shape[:2], np.uint8)
+            cv2.fillPoly(mascara_obs, [np.round(p).astype(np.int32) for p in obstaculos], 255)
+            caminho = simplificar_caminho(caminho_qt, mascara_obs)
+            caminho_wp = caminho
+            print(f"Waypoints: {len(caminho_qt)} nós da quadtree -> {len(caminho)} pontos (sem cruzar obstáculos)")
+            if len(caminho) - 1 > MAX_WAYPOINTS:
+                print(f"Aviso: {len(caminho) - 1} waypoints > MAX_WAYPOINTS={MAX_WAYPOINTS}. "
+                      f"Enviando só os {MAX_WAYPOINTS} primeiros (trecho livre); o robô para antes do destino. "
+                      f"Rode de novo da nova posição.")
+                caminho = caminho[:MAX_WAYPOINTS + 1]
+                caminho_wp = caminho
+        if px_por_m is not None and caminho:
+            caminho_metros = pixel_para_real(caminho, px_por_m, origem=start, frente=FRENTE_ROBO_TELA)
             caminho_metros = [(x * FATOR_ODOMETRIA, y * FATOR_ODOMETRIA) for x, y in caminho_metros]
             waypoints = converter_caminho_para_waypoints(caminho_metros)
-            enviar_para_robo(waypoints, PORTA_SERIAL, BAUD_RATE, theta_inicial=THETA_INICIAL)
-        else:
-            print("Aviso: sem tabuleiro e sem mesa; waypoints nao enviados.")
+        elif px_por_m is None:
+            print("Aviso: sem calibracao salva, sem tabuleiro e sem mesa; waypoints nao enviados.")
     else:
         print("Nenhum caminho encontrado pela quadtree.")
 
+    # plot aparece primeiro (sem bloquear), fica aberto durante a missão
+    _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, folhas_livres, start, goal, caminho_wp)
+
+    if waypoints:
+        enviar_para_robo(waypoints, PORTA_SERIAL, BAUD_RATE, theta_inicial=THETA_INICIAL)
+    plt.show()  # ao fim da missão, mantém o plot até você fechar
+
+
+def _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, folhas_livres, start, goal, caminho_wp=None):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     for ax, titulo, caminho in [(ax1, f"Grade regular ({RESOLUCAO}px)", caminho_grade),
@@ -228,6 +264,8 @@ def main():
             ax.fill(poly[:, 0], poly[:, 1], color="darkred", alpha=0.7)
         if caminho:
             ax.plot(*zip(*caminho), "g-", linewidth=2)
+        if caminho_wp:
+            ax.plot(*zip(*caminho_wp), "o-", color="orange", linewidth=2, markersize=6, label="waypoints enviados")
         ax.plot(*start, "bo", markersize=8)
         ax.plot(*goal, "yo", markersize=8)
         ax.set_title(titulo)
@@ -235,7 +273,9 @@ def main():
         ax2.add_patch(plt.Rectangle((f[0], f[1]), f[2] - f[0], f[3] - f[1],
                                     fill=False, edgecolor="gray", linewidth=0.3))
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.5)  # desenha a janela antes de enviar ao robô
+
 
 if __name__ == "__main__":
     main()
