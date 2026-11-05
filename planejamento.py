@@ -10,41 +10,6 @@ def limitar_waypoints(caminho, max_pts=10):
     indices = np.linspace(0, len(caminho) - 1, max_pts, dtype=int)
     return [caminho[i] for i in indices]
 
-def segmento_livre(p, q, mascara):
-    """True se a reta p->q não toca nenhum pixel marcado (>0) em `mascara`."""
-    h, w = mascara.shape[:2]
-    n = max(int(np.hypot(q[0] - p[0], q[1] - p[1])), 1) + 1
-    xs = np.clip(np.round(np.linspace(p[0], q[0], n)).astype(int), 0, w - 1)
-    ys = np.clip(np.round(np.linspace(p[1], q[1], n)).astype(int), 0, h - 1)
-    return not mascara[ys, xs].any()
-
-def _densificar(caminho, passo):
-    pts = [tuple(caminho[0])]
-    for p, q in zip(caminho[:-1], caminho[1:]):
-        d = np.hypot(q[0] - p[0], q[1] - p[1])
-        n = max(int(d // passo), 1)
-        for k in range(1, n + 1):
-            t = k / n
-            pts.append((p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t))
-    return pts
-
-def simplificar_caminho(caminho, mascara, passo=10):
-    """Menos pontos possível sem cruzar obstáculo: de cada ponto pula para o mais
-    distante visível em linha reta, podendo parar em QUALQUER ponto do caminho
-    (não só nos nós da quadtree)."""
-    if not caminho or len(caminho) <= 2:
-        return caminho
-    densos = _densificar(caminho, passo)
-    resultado = [densos[0]]
-    i = 0
-    while i < len(densos) - 1:
-        j = len(densos) - 1
-        while j > i + 1 and not segmento_livre(densos[i], densos[j], mascara):
-            j -= 1
-        resultado.append(densos[j])
-        i = j
-    return resultado
-
 def converter_caminho_para_waypoints(caminho_metros):
     waypoints = []
     tamanho = len(caminho_metros)

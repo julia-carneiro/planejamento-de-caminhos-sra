@@ -2,7 +2,6 @@ import sys
 import math
 import time
 import cv2
-import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
@@ -12,17 +11,17 @@ from identificar_formas import (abrir_camera, detectar_robo, detectar_obstaculos
                                 obstaculos_fora_da_mesa, escala_pela_mesa)
 from calibracao import calibrar_camera, pixel_para_real
 from planejamento import (build_grid, plan_on_grid, subdivide, plan_on_quadtree,
-                          simplificar_caminho, converter_caminho_para_waypoints)
+                          limitar_waypoints, converter_caminho_para_waypoints)
 import Remote_Position_Control_TEC220 as rpc
 
 RESOLUCAO = 15
 MAX_DEPTH = 7
-PORTA_SERIAL = "/dev/ttyUSB0"
+PORTA_SERIAL = "COM5"
 BAUD_RATE = 57600
 TESTE_SEM_ROBO = False
 MAX_WAYPOINTS = 10
-RAIO_ROBO_PX = 50
-RAIO_EXCLUSAO_ROBO_PX = 90 # contornos dentro desse raio do robô são ignorados como obstáculo
+RAIO_ROBO_PX = 20
+RAIO_EXCLUSAO_ROBO_PX = 60 # contornos dentro desse raio do robô são ignorados como obstáculo
 THETA_INICIAL = 0.0
 # Para onde a FRENTE do robô aponta na imagem ao iniciar, (u, v): (-1,0)=esquerda, (0,-1)=cima, (1,0)=direita
 FRENTE_ROBO_TELA = (-1.0, 0.0)
@@ -219,40 +218,28 @@ def main():
     caminho_qt, folhas_livres = plan_on_quadtree(tree, obstaculos, start, goal)
 
     waypoints = None
-    caminho_wp = None
     if caminho_qt:
         px_por_m = calibrar_camera(frame, escala_mesa=escala_mesa, recalibrar="--recalibrar" in sys.argv)
         if px_por_m is not None:
             print(f"Escala usada: {px_por_m / 100:.2f} px/cm")
-            mascara_obs = np.zeros(frame.shape[:2], np.uint8)
-            cv2.fillPoly(mascara_obs, [np.round(p).astype(np.int32) for p in obstaculos], 255)
-            caminho = simplificar_caminho(caminho_qt, mascara_obs)
-            caminho_wp = caminho
-            print(f"Waypoints: {len(caminho_qt)} nós da quadtree -> {len(caminho)} pontos (sem cruzar obstáculos)")
-            if len(caminho) - 1 > MAX_WAYPOINTS:
-                print(f"Aviso: {len(caminho) - 1} waypoints > MAX_WAYPOINTS={MAX_WAYPOINTS}. "
-                      f"Enviando só os {MAX_WAYPOINTS} primeiros (trecho livre); o robô para antes do destino. "
-                      f"Rode de novo da nova posição.")
-                caminho = caminho[:MAX_WAYPOINTS + 1]
-                caminho_wp = caminho
-        if px_por_m is not None and caminho:
+            caminho = limitar_waypoints(caminho_qt, max_pts=MAX_WAYPOINTS + 1)
             caminho_metros = pixel_para_real(caminho, px_por_m, origem=start, frente=FRENTE_ROBO_TELA)
             caminho_metros = [(x * FATOR_ODOMETRIA, y * FATOR_ODOMETRIA) for x, y in caminho_metros]
             waypoints = converter_caminho_para_waypoints(caminho_metros)
-        elif px_por_m is None:
+        else:
             print("Aviso: sem calibracao salva, sem tabuleiro e sem mesa; waypoints nao enviados.")
     else:
         print("Nenhum caminho encontrado pela quadtree.")
 
     # plot aparece primeiro (sem bloquear), fica aberto durante a missão
-    _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, folhas_livres, start, goal, caminho_wp)
+    _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, folhas_livres, start, goal)
 
     if waypoints:
         enviar_para_robo(waypoints, PORTA_SERIAL, BAUD_RATE, theta_inicial=THETA_INICIAL)
     plt.show()  # ao fim da missão, mantém o plot até você fechar
 
 
-def _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, folhas_livres, start, goal, caminho_wp=None):
+def _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, folhas_livres, start, goal):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     for ax, titulo, caminho in [(ax1, f"Grade regular ({RESOLUCAO}px)", caminho_grade),
@@ -264,8 +251,6 @@ def _plotar(frame, obstaculos, obstaculos_brutos, caminho_grade, caminho_qt, fol
             ax.fill(poly[:, 0], poly[:, 1], color="darkred", alpha=0.7)
         if caminho:
             ax.plot(*zip(*caminho), "g-", linewidth=2)
-        if caminho_wp:
-            ax.plot(*zip(*caminho_wp), "o-", color="orange", linewidth=2, markersize=6, label="waypoints enviados")
         ax.plot(*start, "bo", markersize=8)
         ax.plot(*goal, "yo", markersize=8)
         ax.set_title(titulo)
